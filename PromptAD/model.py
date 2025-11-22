@@ -51,7 +51,7 @@ class PromptLearner(nn.Module):
         normal_prompt_prefix = " ".join(["N"] * n_ctx)
         abnormal_prompt_prefix = " ".join(["A"] * n_ctx_ab)
 
-        self.normal_ctx = nn.Parameter(normal_ctx_vectors)  # to be optimized
+        self.normal_ctx = nn.Parameter(normal_ctx_vectors)  # to be optimized [句子数，N个数，维度]
         self.abnormal_ctx = nn.Parameter(abnormal_ctx_vectors)  # to be optimized
 
         # normal prompt
@@ -76,8 +76,9 @@ class PromptLearner(nn.Module):
         # These token vectors will be saved when in save_model(),
         # but they should be ignored in load_model() as we want to use
         # those computed using the current class names
+        #以下为去除了可学习的中间部分，仅保留前后固定部分
         self.register_buffer("normal_token_prefix", normal_embedding[:, :1, :])  # SOS
-        self.register_buffer("normal_token_suffix", normal_embedding[:, 1 + n_ctx:, :])  # CLS, EOS
+        self.register_buffer("normal_token_suffix", normal_embedding[:, 1 + n_ctx:, :])  # CLS, EOS 
 
         self.register_buffer("abnormal_token_prefix_handle", abnormal_embedding_handle[:, :1, :])  # SOS
         self.register_buffer("abnormal_token_suffix_handle", abnormal_embedding_handle[:, 1 + n_ctx:, :])  # CLS, EOS
@@ -99,11 +100,11 @@ class PromptLearner(nn.Module):
     def forward(self):
 
         # learned normal prompt
-        normal_ctx = self.normal_ctx
+        normal_ctx = self.normal_ctx #[3,4,640]
 
-        normal_prefix = self.normal_token_prefix
-        normal_suffix = self.normal_token_suffix
-
+        normal_prefix = self.normal_token_prefix #[3,1,640]
+        normal_suffix = self.normal_token_suffix #[3,72,640]
+        #将可训练的参数进行拼接，秒！
         normal_prompts = torch.cat(
             [
                 normal_prefix,  # (n_pro, 1, dim)
@@ -114,15 +115,15 @@ class PromptLearner(nn.Module):
         )
 
         # handle abnormal prompt
-        n_ab_handle = self.n_ab_handle
+        n_ab_handle = self.n_ab_handle #11
 
         n_pro, n_ctx, dim = normal_ctx.shape
-        normal_ctx1 = normal_ctx.unsqueeze(0).expand(n_ab_handle, -1, -1, -1).reshape(-1, n_ctx, dim)
+        normal_ctx1 = normal_ctx.unsqueeze(0).expand(n_ab_handle, -1, -1, -1).reshape(-1, n_ctx, dim) #参数共享
 
         abnormal_prefix_handle = self.abnormal_token_prefix_handle
         abnormal_suffix_handle = self.abnormal_token_suffix_handle
 
-        abnormal_prompts_handle = torch.cat(
+        abnormal_prompts_handle = torch.cat(  #可学习的正常，人为的异常
             [
                 abnormal_prefix_handle,     # (n_pro * n_ab_handle, 1, dim)
                 normal_ctx1,                # (n_pro * n_ab_handle, n_ctx, dim)
@@ -235,7 +236,7 @@ class PromptAD(torch.nn.Module):
         self.tokenized_abnormal_prompts = torch.cat([self.tokenized_abnormal_prompts_handle, self.tokenized_abnormal_prompts_learned], dim=0)
 
     @torch.no_grad()
-    def encode_image(self, image: torch.Tensor):
+    def encode_image(self, image: torch.Tensor): #mark
 
         if self.precision == "fp16":
             image = image.half()
@@ -257,7 +258,7 @@ class PromptAD(torch.nn.Module):
         normal_text_embeddings, abnormal_text_embeddings_handle, abnormal_text_embeddings_learned = self.prompt_learner()
         abnormal_text_embeddings = torch.cat([abnormal_text_embeddings_handle, abnormal_text_embeddings_learned], dim=0)
 
-        if self.version == "V1":
+        if self.version == "V1":#把训练好的句子输入clip的文本编码器
             normal_text_features = self.encode_text_embedding(normal_text_embeddings, self.tokenized_normal_prompts)
             abnormal_text_features = self.encode_text_embedding(abnormal_text_embeddings, self.tokenized_abnormal_prompts)
         elif self.version == "V2":
@@ -286,7 +287,7 @@ class PromptAD(torch.nn.Module):
         avr_abnormal_text_features = avr_abnormal_text_features
         text_features = torch.cat([avr_normal_text_features, avr_abnormal_text_features], dim=0)
         self.text_features.copy_(text_features / text_features.norm(dim=-1, keepdim=True))
-
+# 2，640
     def build_image_feature_gallery(self, features1, features2):
         b1, n1, d1 = features1.shape
         self.feature_gallery1.copy_(F.normalize(features1.reshape(-1, d1), dim=-1))
@@ -317,7 +318,7 @@ class PromptAD(torch.nn.Module):
             # ################################################ global cls token scores ##########################
             # global_feature = self.cross_attention(visual_features[0].unsqueeze(dim=1)).squeeze(dim=1)
             global_feature = visual_features[0]
-            global_normality_and_abnormality_score = (t * global_feature @ self.text_features.T).softmax(dim=-1)
+            global_normality_and_abnormality_score = (t * global_feature @ self.text_features.T).softmax(dim=-1) #[83,2]
 
             global_abnormality_score = global_normality_and_abnormality_score[:, 1]
 
@@ -330,12 +331,12 @@ class PromptAD(torch.nn.Module):
 
     def calculate_visual_anomaly_score(self, visual_features):
         N = visual_features[1].shape[0]
-
+#[83,225,896]*[225,896]最后score1的shape是83，225，代表每张图片每个像素点的异常得分
         score1, _ = (1.0 - visual_features[2] @ self.feature_gallery1.t()).min(dim=-1)
         score1 /= 2.0
 
         score2, _ = (1.0 - visual_features[3] @ self.feature_gallery2.t()).min(dim=-1)
-        score2 /= 2.0
+        score2 /= 2.0 #1-[-1,1]的范围为0-2，故除以2
 
         score = torch.zeros((N, self.grid_size[0] * self.grid_size[1])) + 0.5 * (score1 + score2).cpu()
 
@@ -346,14 +347,14 @@ class PromptAD(torch.nn.Module):
         visual_features = self.encode_image(images)
         if task == 'seg':
             textual_anomaly_map = self.calculate_textual_anomaly_score(visual_features, 'seg')
-
+#seg上面得到的是patch级的分数
             visual_anomaly_map = self.calculate_visual_anomaly_score(visual_features)
-            #
+            #上面输出的是【83,1，15，15】，是每个图片的和记忆库比对的像素级分数
             anomaly_map = 1. / (1. / textual_anomaly_map + 1. / visual_anomaly_map)
             # anomaly_map = 0.5 * (textual_anomaly_map + visual_anomaly_map)
             # anomaly_map = visual_anomaly_map
             # anomaly_map = textual_anomaly_map
-
+#上面直接得到了像素级大的分数
             anomaly_map = F.interpolate(anomaly_map, size=(self.out_size_h, self.out_size_w), mode='bilinear', align_corners=False)
 
             am_pix = anomaly_map.squeeze(1).numpy()
@@ -368,14 +369,14 @@ class PromptAD(torch.nn.Module):
 
         elif task == 'cls':
             textual_anomaly = self.calculate_textual_anomaly_score(visual_features, 'cls')
-
+#上面输出的是【83,1】，是每个图片的和文字比对的图像级分数
             visual_anomaly_map = self.calculate_visual_anomaly_score(visual_features)
-
+#上面输出的是【83,1，15，15】，是每个图片的和记忆库比对的像素级分数
             anomaly_map = F.interpolate(visual_anomaly_map, size=(self.out_size_h, self.out_size_w), mode='bilinear',
                                         align_corners=False)
 
             am_pix = anomaly_map.squeeze(1).numpy()
-
+#am_pix的shape为83，400，400
             am_pix_list = []
 
             for i in range(am_pix.shape[0]):
@@ -385,7 +386,7 @@ class PromptAD(torch.nn.Module):
             for i in range(textual_anomaly.shape[0]):
                 am_img_list.append(textual_anomaly[i])
 
-            return am_img_list, am_pix_list
+            return am_img_list, am_pix_list #am_pix_list为列表，长度为83，每个元素为400*400的numpy数组，另一个长度为83，那个元素为1
         else:
             assert 'task error'
 

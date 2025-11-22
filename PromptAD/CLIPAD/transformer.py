@@ -335,7 +335,7 @@ class Transformer(nn.Module):
                 # TODO: handle kwargs https://github.com/pytorch/pytorch/issues/79887#issuecomment-1161758372
                 x = checkpoint(r, x, None, None, attn_mask)
             else:
-                x = r(x, attn_mask=attn_mask)
+                x = r(x, attn_mask=attn_mask) #返回的是列表[x,x_ori]
         return x
 
 
@@ -736,7 +736,7 @@ class V2VTransformer(nn.Module):
         if self.proj is not None:
             pooled = pooled @ self.proj
             tokens = tokens @ self.proj
-
+#[1,640] [1,225,640]
         # return pooled, tokens, x_ori[:, 1:, :], self.mid_feature
         return pooled, tokens, self.mid_feature1, self.mid_feature2
 

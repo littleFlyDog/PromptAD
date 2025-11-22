@@ -4,10 +4,12 @@ from multiprocessing import Pool
 
 if __name__ == '__main__':
 
-    pool = Pool(processes=1)
+    pool = Pool(processes=4)
 
-    datasets = ['mvtec', 'visa']
+    # datasets = ['mvtec', 'visa']
+    datasets = ['mvtec']
     shots = [1, 2, 4]
+    # shots = [1]
 
     for shot in shots:
         for dataset in datasets:

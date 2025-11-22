@@ -12,7 +12,8 @@ from utils.eval_utils import *
 from torchvision import transforms
 import random
 from tqdm import tqdm
-
+import wandb
+from datetime import datetime
 TASK = 'CLS'
 
 
@@ -24,8 +25,11 @@ def save_check_point(model, path):
     ]
     state_dict = model.state_dict()
     selected_state_dict = {k: v for k, v in state_dict.items() if k in selected_keys}
-
+#保存了两个记忆库和文本特征
     torch.save(selected_state_dict, path)
+    arti_model=wandb.Artifact('best_model','model')
+    arti_model.add_file(path)
+    wandb.log_artifact(arti_model) 
 
 def fit(model,
         args,
@@ -48,7 +52,7 @@ def fit(model,
         features1.append(feature_map1)
         features2.append(feature_map2)
 
-    features1 = torch.cat(features1, dim=0)
+    features1 = torch.cat(features1, dim=0) #这里的图像在在中间层的输出，用于构建特征库
     features2 = torch.cat(features2, dim=0)
     model.build_image_feature_gallery(features1, features2)
 
@@ -58,7 +62,7 @@ def fit(model,
     criterion_tip = TripletLoss(margin=0.0)
 
     best_result_dict = None
-    for epoch in range(args.Epoch):
+    for epoch in tqdm(range(args.Epoch), desc='training...',leave=False):
         for (data, mask, label, name, img_type) in train_data:
             data = [model.transform(Image.fromarray(cv2.cvtColor(f.numpy(), cv2.COLOR_BGR2RGB))) for f in data]
             data = torch.stack(data, dim=0).to(device)
@@ -69,9 +73,9 @@ def fit(model,
             normal_text_prompt, abnormal_text_prompt_handle, abnormal_text_prompt_learned = model.prompt_learner()
 
             optimizer.zero_grad()
-
+#3，640
             normal_text_features = model.encode_text_embedding(normal_text_prompt, model.tokenized_normal_prompts)
-
+# 33，640（3个正常句子（3*4）个可学习参数配11个固定句子） 和 12(3个正常句子（3*4）个可学习参数配4个异常句子（4*1）个可学习参数)，640 和 45，640
             abnormal_text_features_handle = model.encode_text_embedding(abnormal_text_prompt_handle, model.tokenized_abnormal_prompts_handle)
             abnormal_text_features_learned = model.encode_text_embedding(abnormal_text_prompt_learned, model.tokenized_abnormal_prompts_learned)
             abnormal_text_features = torch.cat([abnormal_text_features_handle, abnormal_text_features_learned], dim=0)
@@ -81,7 +85,7 @@ def fit(model,
             mean_ad_learned = torch.mean(F.normalize(abnormal_text_features_learned, dim=-1), dim=0)
 
             loss_match_abnormal = (mean_ad_handle - mean_ad_learned).norm(dim=0) ** 2.0
-
+#输出的是vit的cls，vvv的最后一层patchtoken，两个中间层的token（）？
             cls_feature, _, _, _ = model.encode_image(data)
 
             # compute v2t loss and triplet loss
@@ -94,7 +98,7 @@ def fit(model,
 
             l_pos = torch.einsum('nc,cm->nm', cls_feature, normal_text_features_ahchor.transpose(0, 1))
             l_neg_v2t = torch.einsum('nc,cm->nm', cls_feature, abnormal_text_features.transpose(0, 1))
-
+# 1，1   1，45
             if model.precision == 'fp16':
                 logit_scale = model.model.logit_scale.half()
             else:
@@ -120,7 +124,7 @@ def fit(model,
         gt_list = []
         gt_mask_list = []
         names = []
-
+#开始测试
         for (data, mask, label, name, img_type) in dataloader:
 
             data = [model.transform(Image.fromarray(f.numpy())) for f in data]
@@ -136,14 +140,14 @@ def fit(model,
                 gt_list += [l]
                 gt_mask_list += [m]
 
-            data = data.to(device)
+            data = data.to(device) #83,3,240,240
             score_img, score_map = model(data, 'cls')
             score_maps += score_map
             scores_img += score_img
 
         test_imgs, score_maps, gt_mask_list = specify_resolution(test_imgs, score_maps, gt_mask_list, resolution=(args.resolution, args.resolution))
         result_dict = metric_cal_img(np.array(scores_img), gt_list, np.array(score_maps))
-
+        
         if best_result_dict is None:
             save_check_point(model, check_path)
             best_result_dict = result_dict
@@ -151,11 +155,19 @@ def fit(model,
         elif best_result_dict['i_roc'] < result_dict['i_roc']:
             save_check_point(model, check_path)
             best_result_dict = result_dict
-
+        wandb.log({'Epoch': epoch,
+                   'Image-AUROC': result_dict['i_roc'],
+                   'Loss': loss.item()
+                   })
     return best_result_dict
 
 
 def main(args):
+    wandb.login()
+    wandb.init(project=f'PromptAD-cls-{args.dataset}',
+               mode='offline',
+            name=f'{args.class_name}-{args.k_shot}shot-{datetime.now().strftime("%Y-%m-%d_%H:%M:%S")}',
+            config=args)
     kwargs = vars(args)
 
     if kwargs['seed'] is None:
@@ -194,6 +206,7 @@ def main(args):
 
     save_metric(metrics, dataset_classes[kwargs['dataset']], kwargs['class_name'],
                 kwargs['dataset'], csv_path)
+    wandb.finish()
 
 
 def str2bool(v):

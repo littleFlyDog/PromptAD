@@ -11,6 +11,8 @@ from PromptAD import *
 from utils.eval_utils import *
 from torchvision import transforms
 from tqdm import tqdm
+from datetime import datetime
+import wandb
 
 TASK = 'SEG'
 
@@ -24,6 +26,9 @@ def save_check_point(model, path):
     selected_state_dict = {k: v for k, v in state_dict.items() if k in selected_keys}
 
     torch.save(selected_state_dict, path)
+    arti_model=wandb.Artifact('best_model','model')
+    arti_model.add_file(path)
+    wandb.log_artifact(arti_model)  
 
 
 def fit(model,
@@ -58,7 +63,7 @@ def fit(model,
     criterion_tip = TripletLoss(margin=0.0)
 
     best_result_dict = None
-    for epoch in range(args.Epoch):
+    for epoch in tqdm(range(args.Epoch), desc='training...',leave=False):
         for (data, mask, label, name, img_type) in train_data:
             data = [model.transform(Image.fromarray(cv2.cvtColor(f.numpy(), cv2.COLOR_BGR2RGB))) for f in data]
             data = torch.stack(data, dim=0).to(device)
@@ -81,7 +86,7 @@ def fit(model,
 
             loss_match_abnormal = (mean_ad_handle - mean_ad_learned).norm(dim=0) ** 2.0
 
-            _, feature_map, _, _ = model.encode_image(data)
+            _, feature_map, _, _ = model.encode_image(data) #不同：这里提取的是feature_map [2(k),225,640]
 
             # compute v2t loss and triplet loss
             normal_text_features_ahchor = normal_text_features.mean(dim=0).unsqueeze(0)
@@ -91,7 +96,7 @@ def fit(model,
             abnormal_text_features_ahchor = abnormal_text_features_ahchor / abnormal_text_features_ahchor.norm(dim=-1, keepdim=True)
             abnormal_text_features = abnormal_text_features / abnormal_text_features.norm(dim=-1, keepdim=True)
 
-            l_pos = torch.einsum('nic,cj->nij', feature_map, normal_text_features_ahchor.transpose(0, 1))
+            l_pos = torch.einsum('nic,cj->nij', feature_map, normal_text_features_ahchor.transpose(0, 1)) #[2,225,1]
             l_neg_v2t = torch.einsum('nic,cj->nij', feature_map, abnormal_text_features.transpose(0, 1))
 
             if model.precision == 'fp16':
@@ -102,9 +107,9 @@ def fit(model,
             logits_v2t = torch.cat([l_pos, l_neg_v2t], dim=-1) * logit_scale
 
             target_v2t = torch.zeros([logits_v2t.shape[0], logits_v2t.shape[1]], dtype=torch.long).to(device)
-
+            #做一总结，seg部分的损失是k张正常图片的每个patch和文本计算得到的，features_map
             loss_v2t = criterion(logits_v2t.transpose(1, 2), target_v2t)
-
+            #这里的默认redection='mean'，所以返回的是平均值，始终为标量
             trip_loss = criterion_tip(feature_map, normal_text_features_ahchor, abnormal_text_features_ahchor)
             loss = loss_v2t + trip_loss + loss_match_abnormal * args.lambda1
 
@@ -150,11 +155,18 @@ def fit(model,
             save_check_point(model, check_path)
             if args.vis:
                 plot_sample_cv2(names, test_imgs, {'PromptAD': score_maps}, gt_mask_list, save_folder=img_dir)
-
+        wandb.log({'Epoch': epoch,
+                   'Pixel-AUROC': result_dict['p_roc'],
+                   'Loss': loss.item()
+                   })
     return best_result_dict
 
 
 def main(args):
+    wandb.login()
+    wandb.init(project=f'PromptAD-seg-{args.dataset}', 
+            name=f'{args.class_name}-{args.k_shot}shot-{datetime.now().strftime("%Y-%m-%d_%H:%M:%S")}',
+            config=args)
     kwargs = vars(args)
 
     if kwargs['seed'] is None:
@@ -193,6 +205,7 @@ def main(args):
 
     save_metric(metrics, dataset_classes[kwargs['dataset']], kwargs['class_name'],
                 kwargs['dataset'], csv_path)
+    wandb.finish()
 
 
 def str2bool(v):
@@ -209,7 +222,7 @@ def get_args():
     parser.add_argument('--resolution', type=int, default=400)
 
     parser.add_argument('--batch-size', type=int, default=400)
-    parser.add_argument('--vis', type=str2bool, choices=[True, False], default=True)
+    parser.add_argument('--vis', type=str2bool, choices=[True, False], default=True) #这里default变为了True
     parser.add_argument("--root-dir", type=str, default="./result")
     parser.add_argument("--load-memory", type=str2bool, default=True)
     parser.add_argument("--cal-pro", type=str2bool, default=False)
@@ -231,7 +244,7 @@ def get_args():
     # prompt tuning hyper-parameter
     parser.add_argument("--n_ctx", type=int, default=4)
     parser.add_argument("--n_ctx_ab", type=int, default=1)
-    parser.add_argument("--n_pro", type=int, default=1)
+    parser.add_argument("--n_pro", type=int, default=1)  #这里default变为了1
     parser.add_argument("--n_pro_ab", type=int, default=4)
     parser.add_argument("--Epoch", type=int, default=100)
 
